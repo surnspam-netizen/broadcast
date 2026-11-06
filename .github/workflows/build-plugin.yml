@@ -1,0 +1,433 @@
+# CommandBroadcast - all-in-one build workflow.
+# Put this single file at  .github/workflows/build-plugin.yml  in a GitHub repo.
+# It writes the whole plugin source, compiles it, and uploads the .jar.
+name: Build CommandBroadcast plugin
+
+on:
+  push:
+  workflow_dispatch:   # lets you press "Run workflow" manually
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Set up Java 21
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - name: Create plugin source files
+        run: |
+          mkdir -p "$(dirname 'pom.xml')"
+          cat > 'pom.xml' << 'COMMANDBROADCAST_EOF_0'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <project xmlns="http://maven.apache.org/POM/4.0.0"
+                   xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance"
+                   xsi:schemaLocation="http://maven.apache.org/POM/4.0.0 http://maven.apache.org/xsd/maven-4.0.0.xsd">
+            <modelVersion>4.0.0</modelVersion>
+
+            <groupId>me.example</groupId>
+            <artifactId>CommandBroadcast</artifactId>
+            <version>1.1.0</version>
+            <packaging>jar</packaging>
+
+            <properties>
+              <maven.compiler.source>21</maven.compiler.source>
+              <maven.compiler.target>21</maven.compiler.target>
+              <maven.compiler.release>21</maven.compiler.release>
+              <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+            </properties>
+
+            <repositories>
+              <repository>
+                <id>papermc</id>
+                <url>https://repo.papermc.io/repository/maven-public/</url>
+              </repository>
+            </repositories>
+
+            <dependencies>
+              <dependency>
+                <groupId>io.papermc.paper</groupId>
+                <artifactId>paper-api</artifactId>
+                <version>1.21.11-R0.1-SNAPSHOT</version>
+                <scope>provided</scope>
+              </dependency>
+            </dependencies>
+
+            <build>
+              <finalName>CommandBroadcast-${project.version}</finalName>
+            </build>
+          </project>
+          COMMANDBROADCAST_EOF_0
+
+          mkdir -p "$(dirname 'src/main/resources/plugin.yml')"
+          cat > 'src/main/resources/plugin.yml' << 'COMMANDBROADCAST_EOF_1'
+          name: CommandBroadcast
+          version: 1.1.0
+          main: me.example.commandbroadcast.CommandBroadcast
+          api-version: "1.21"
+          description: Broadcasts commands typed by players (including operators) to everyone in chat, with an in-game control GUI.
+          commands:
+            commandbroadcast:
+              description: Open the CommandBroadcast control GUI, or reload the config.
+              usage: /<command> [reload]
+              aliases: [cbc]
+          permissions:
+            commandbroadcast.admin:
+              description: Allows opening the control GUI and reloading the config.
+              default: op
+            commandbroadcast.hide:
+              description: Commands from players with this permission are not broadcast.
+              default: false
+          COMMANDBROADCAST_EOF_1
+
+          mkdir -p "$(dirname 'src/main/resources/config.yml')"
+          cat > 'src/main/resources/config.yml' << 'COMMANDBROADCAST_EOF_2'
+          # Most of these can be toggled in-game with /commandbroadcast (or /cbc).
+
+          # Master switch.
+          enabled: true
+
+          # Placeholders: {player} and {command}. Use & color codes.
+          format: "&8[&cCMD&8] &7{player}&8: &f{command}"
+
+          # true  = only broadcast commands typed by operators
+          # false = broadcast commands from every player
+          only-operators: false
+
+          # true  = everyone online sees the messages (including non-operators)
+          # false = only operators and the console see them
+          show-to-non-operators: true
+
+          # true = never broadcast the commands listed in hidden-commands
+          hide-sensitive-commands: true
+
+          # Commands that are never broadcast (passwords etc.)
+          hidden-commands:
+            - login
+            - l
+            - register
+            - reg
+            - changepassword
+            - unregister
+          COMMANDBROADCAST_EOF_2
+
+          mkdir -p "$(dirname 'src/main/java/me/example/commandbroadcast/CommandBroadcast.java')"
+          cat > 'src/main/java/me/example/commandbroadcast/CommandBroadcast.java' << 'COMMANDBROADCAST_EOF_3'
+          package me.example.commandbroadcast;
+
+          import net.kyori.adventure.text.Component;
+          import net.kyori.adventure.text.TextReplacementConfig;
+          import net.kyori.adventure.text.format.NamedTextColor;
+          import net.kyori.adventure.text.serializer.legacy.LegacyComponentSerializer;
+          import org.bukkit.Bukkit;
+          import org.bukkit.command.Command;
+          import org.bukkit.command.CommandExecutor;
+          import org.bukkit.command.CommandSender;
+          import org.bukkit.entity.Player;
+          import org.bukkit.event.EventHandler;
+          import org.bukkit.event.EventPriority;
+          import org.bukkit.event.Listener;
+          import org.bukkit.event.inventory.InventoryClickEvent;
+          import org.bukkit.event.inventory.InventoryDragEvent;
+          import org.bukkit.event.player.PlayerCommandPreprocessEvent;
+          import org.bukkit.plugin.java.JavaPlugin;
+
+          import java.util.List;
+          import java.util.Locale;
+
+          public class CommandBroadcast extends JavaPlugin implements Listener, CommandExecutor {
+
+              public static final String ADMIN_PERMISSION = "commandbroadcast.admin";
+
+              @Override
+              public void onEnable() {
+                  saveDefaultConfig();
+                  getServer().getPluginManager().registerEvents(this, this);
+                  var cmd = getCommand("commandbroadcast");
+                  if (cmd != null) cmd.setExecutor(this);
+                  getLogger().info("CommandBroadcast enabled.");
+              }
+
+              // ------------------------------------------------------------------
+              // /commandbroadcast  (opens the GUI)   /commandbroadcast reload
+              // ------------------------------------------------------------------
+              @Override
+              public boolean onCommand(CommandSender sender, Command command, String label, String[] args) {
+                  if (!sender.hasPermission(ADMIN_PERMISSION)) {
+                      sender.sendMessage(Component.text("You don't have permission to do that.", NamedTextColor.RED));
+                      return true;
+                  }
+
+                  if (args.length > 0 && args[0].equalsIgnoreCase("reload")) {
+                      reloadConfig();
+                      sender.sendMessage(Component.text("CommandBroadcast config reloaded.", NamedTextColor.GREEN));
+                      return true;
+                  }
+
+                  if (!(sender instanceof Player player)) {
+                      sender.sendMessage(Component.text("Only players can open the GUI. Use /" + label + " reload from console.",
+                              NamedTextColor.RED));
+                      return true;
+                  }
+
+                  new ControlGui(this).open(player);
+                  return true;
+              }
+
+              // ------------------------------------------------------------------
+              // GUI click handling
+              // ------------------------------------------------------------------
+              @EventHandler
+              public void onGuiClick(InventoryClickEvent event) {
+                  if (!(event.getView().getTopInventory().getHolder() instanceof ControlGui gui)) return;
+                  event.setCancelled(true);
+
+                  if (!(event.getWhoClicked() instanceof Player player)) return;
+                  if (!player.hasPermission(ADMIN_PERMISSION)) {
+                      player.closeInventory();
+                      return;
+                  }
+                  // Only react to clicks inside the GUI itself, not the player's own inventory
+                  if (event.getClickedInventory() == null
+                          || event.getClickedInventory() != event.getView().getTopInventory()) return;
+
+                  gui.handleClick(player, event.getSlot());
+              }
+
+              @EventHandler
+              public void onGuiDrag(InventoryDragEvent event) {
+                  if (event.getView().getTopInventory().getHolder() instanceof ControlGui) {
+                      event.setCancelled(true);
+                  }
+              }
+
+              // ------------------------------------------------------------------
+              // Command broadcasting
+              // ------------------------------------------------------------------
+              @EventHandler(priority = EventPriority.MONITOR, ignoreCancelled = true)
+              public void onCommand(PlayerCommandPreprocessEvent event) {
+                  if (!getConfig().getBoolean("enabled", true)) return;
+
+                  var player = event.getPlayer();
+
+                  // Skip players who are explicitly hidden
+                  if (player.hasPermission("commandbroadcast.hide")) return;
+
+                  // Optionally only broadcast operator commands
+                  if (getConfig().getBoolean("only-operators", false) && !player.isOp()) return;
+
+                  String message = event.getMessage(); // includes the leading "/"
+                  if (message.length() < 2) return;
+
+                  // Never broadcast sensitive commands (passwords etc.)
+                  if (getConfig().getBoolean("hide-sensitive-commands", true)) {
+                      String label = message.substring(1).split(" ")[0].toLowerCase(Locale.ROOT);
+                      if (label.contains(":")) label = label.substring(label.indexOf(':') + 1);
+                      List<String> hidden = getConfig().getStringList("hidden-commands");
+                      for (String h : hidden) {
+                          if (label.equalsIgnoreCase(h)) return;
+                      }
+                  }
+
+                  String format = getConfig().getString("format",
+                          "&8[&cCMD&8] &7{player}&8: &f{command}");
+
+                  Component line = LegacyComponentSerializer.legacyAmpersand()
+                          .deserialize(format.replace("{player}", player.getName()))
+                          .replaceText(TextReplacementConfig.builder()
+                                  .matchLiteral("{command}")
+                                  .replacement(Component.text(message))
+                                  .build());
+
+                  if (getConfig().getBoolean("show-to-non-operators", true)) {
+                      // Everyone online (and the console)
+                      Bukkit.broadcast(line);
+                  } else {
+                      // Operators + console only
+                      for (Player online : Bukkit.getOnlinePlayers()) {
+                          if (online.isOp()) online.sendMessage(line);
+                      }
+                      Bukkit.getConsoleSender().sendMessage(line);
+                  }
+              }
+          }
+          COMMANDBROADCAST_EOF_3
+
+          mkdir -p "$(dirname 'src/main/java/me/example/commandbroadcast/ControlGui.java')"
+          cat > 'src/main/java/me/example/commandbroadcast/ControlGui.java' << 'COMMANDBROADCAST_EOF_4'
+          package me.example.commandbroadcast;
+
+          import net.kyori.adventure.text.Component;
+          import net.kyori.adventure.text.format.NamedTextColor;
+          import net.kyori.adventure.text.format.TextColor;
+          import net.kyori.adventure.text.format.TextDecoration;
+          import org.bukkit.Bukkit;
+          import org.bukkit.Material;
+          import org.bukkit.Sound;
+          import org.bukkit.entity.Player;
+          import org.bukkit.inventory.Inventory;
+          import org.bukkit.inventory.InventoryHolder;
+          import org.bukkit.inventory.ItemStack;
+          import org.bukkit.inventory.meta.ItemMeta;
+
+          import java.util.ArrayList;
+          import java.util.List;
+
+          /**
+           * Chest-style control panel for CommandBroadcast.
+           * Open with /commandbroadcast (alias /cbc).
+           */
+          public class ControlGui implements InventoryHolder {
+
+              private static final int SLOT_INFO = 4;
+              private static final int SLOT_ENABLED = 10;
+              private static final int SLOT_ONLY_OPS = 11;
+              private static final int SLOT_SHOW_NON_OPS = 12;
+              private static final int SLOT_HIDE_SENSITIVE = 13;
+              private static final int SLOT_RELOAD = 15;
+              private static final int SLOT_CLOSE = 16;
+
+              private final CommandBroadcast plugin;
+              private final Inventory inventory;
+
+              public ControlGui(CommandBroadcast plugin) {
+                  this.plugin = plugin;
+                  this.inventory = Bukkit.createInventory(this, 27,
+                          Component.text("CommandBroadcast Control", NamedTextColor.DARK_GRAY));
+                  render();
+              }
+
+              @Override
+              public Inventory getInventory() {
+                  return inventory;
+              }
+
+              public void open(Player player) {
+                  player.openInventory(inventory);
+                  player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 0.5f, 1.2f);
+              }
+
+              // ------------------------------------------------------------------
+              // Drawing
+              // ------------------------------------------------------------------
+              private void render() {
+                  ItemStack filler = item(Material.GRAY_STAINED_GLASS_PANE, Component.text(" "), List.of());
+                  for (int i = 0; i < inventory.getSize(); i++) {
+                      inventory.setItem(i, filler);
+                  }
+
+                  var cfg = plugin.getConfig();
+
+                  inventory.setItem(SLOT_INFO, item(Material.PAPER,
+                          name("CommandBroadcast", NamedTextColor.GOLD),
+                          List.of(
+                                  lore("Shows typed commands in chat.", NamedTextColor.GRAY),
+                                  lore("Click a toggle below to change it.", NamedTextColor.GRAY),
+                                  lore("Changes are saved instantly.", NamedTextColor.DARK_GRAY)
+                          )));
+
+                  inventory.setItem(SLOT_ENABLED, toggle(
+                          cfg.getBoolean("enabled", true),
+                          "Broadcasting",
+                          "Master switch for the whole plugin."));
+
+                  inventory.setItem(SLOT_ONLY_OPS, toggle(
+                          cfg.getBoolean("only-operators", false),
+                          "Only operator commands",
+                          "ON: only operators' commands are shown.",
+                          "OFF: every player's commands are shown."));
+
+                  inventory.setItem(SLOT_SHOW_NON_OPS, toggle(
+                          cfg.getBoolean("show-to-non-operators", true),
+                          "Visible to non-operators",
+                          "ON: everyone sees the messages.",
+                          "OFF: only operators and the console do."));
+
+                  inventory.setItem(SLOT_HIDE_SENSITIVE, toggle(
+                          cfg.getBoolean("hide-sensitive-commands", true),
+                          "Hide password commands",
+                          "ON: /login, /register etc. are never shown.",
+                          "Edit the list in config.yml (hidden-commands)."));
+
+                  inventory.setItem(SLOT_RELOAD, item(Material.ANVIL,
+                          name("Reload config", NamedTextColor.AQUA),
+                          List.of(lore("Re-read config.yml from disk.", NamedTextColor.GRAY))));
+
+                  inventory.setItem(SLOT_CLOSE, item(Material.BARRIER,
+                          name("Close", NamedTextColor.RED),
+                          List.of()));
+              }
+
+              private ItemStack toggle(boolean on, String title, String... description) {
+                  List<Component> lore = new ArrayList<>();
+                  for (String line : description) {
+                      lore.add(lore(line, NamedTextColor.GRAY));
+                  }
+                  lore.add(Component.empty());
+                  lore.add(lore("Click to turn " + (on ? "OFF" : "ON"), NamedTextColor.YELLOW));
+
+                  Component display = Component.text(title + ": ", NamedTextColor.WHITE)
+                          .append(Component.text(on ? "ON" : "OFF", on ? NamedTextColor.GREEN : NamedTextColor.RED))
+                          .decoration(TextDecoration.ITALIC, false);
+
+                  return item(on ? Material.LIME_CONCRETE : Material.RED_CONCRETE, display, lore);
+              }
+
+              private static Component name(String text, TextColor color) {
+                  return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
+              }
+
+              private static Component lore(String text, TextColor color) {
+                  return Component.text(text, color).decoration(TextDecoration.ITALIC, false);
+              }
+
+              private static ItemStack item(Material material, Component displayName, List<Component> lore) {
+                  ItemStack stack = new ItemStack(material);
+                  ItemMeta meta = stack.getItemMeta();
+                  meta.displayName(displayName);
+                  if (!lore.isEmpty()) meta.lore(lore);
+                  stack.setItemMeta(meta);
+                  return stack;
+              }
+
+              // ------------------------------------------------------------------
+              // Clicking
+              // ------------------------------------------------------------------
+              public void handleClick(Player player, int slot) {
+                  switch (slot) {
+                      case SLOT_ENABLED -> flip(player, "enabled", true);
+                      case SLOT_ONLY_OPS -> flip(player, "only-operators", false);
+                      case SLOT_SHOW_NON_OPS -> flip(player, "show-to-non-operators", true);
+                      case SLOT_HIDE_SENSITIVE -> flip(player, "hide-sensitive-commands", true);
+                      case SLOT_RELOAD -> {
+                          plugin.reloadConfig();
+                          render();
+                          player.playSound(player.getLocation(), Sound.BLOCK_ANVIL_USE, 0.4f, 1.4f);
+                          player.sendMessage(Component.text("CommandBroadcast config reloaded.", NamedTextColor.GREEN));
+                      }
+                      case SLOT_CLOSE -> player.closeInventory();
+                      default -> { /* decoration */ }
+                  }
+              }
+
+              private void flip(Player player, String key, boolean defaultValue) {
+                  boolean now = !plugin.getConfig().getBoolean(key, defaultValue);
+                  plugin.getConfig().set(key, now);
+                  plugin.saveConfig();
+                  render();
+                  player.playSound(player.getLocation(), Sound.UI_BUTTON_CLICK, 0.6f, now ? 1.4f : 0.8f);
+              }
+          }
+          COMMANDBROADCAST_EOF_4
+
+      - name: Build with Maven
+        run: mvn -B clean package
+
+      - name: Upload plugin jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: CommandBroadcast
+          path: target/CommandBroadcast-*.jar
+          if-no-files-found: error
